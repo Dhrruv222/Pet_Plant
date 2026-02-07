@@ -1,0 +1,9 @@
+Flask==2.3.3
+langchain==0.1.0
+langchain-community==0.0.10
+ollama==0.1.0
+chromadb==0.4.24
+paho-mqtt==1.6.1
+pyngrok==7.0.3
+python-dotenv==1.0.0
+requests>=2.31.0

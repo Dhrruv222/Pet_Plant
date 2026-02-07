@@ -1,0 +1,7 @@
+{
+  "temperature": 24.5,
+  "humidity": 55.0,
+  "soil_moisture": 45.0,
+  "gas_level": 280,
+  "timestamp": "2024-02-07T10:30:00"
+}

@@ -1,0 +1,12 @@
+{
+  "dhrruv": {
+    "password": "demo123",
+    "email": "dhrruv@example.com",
+    "plant_name": "Bella"
+  },
+  "demo": {
+    "password": "demo",
+    "email": "demo@example.com",
+    "plant_name": "Sunny"
+  }
+}
