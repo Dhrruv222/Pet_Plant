@@ -3,11 +3,13 @@ RAG Pipeline for Plant Care Knowledge
 Uses LangChain + ChromaDB + Local LLM (Ollama)
 """
 
-from langchain.text_splitter import CharacterTextSplitter
+from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OllamaEmbeddings
-from langchain.chains import RetrievalQA
 from langchain_community.llms import Ollama
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 import os
 
 class RAGPipeline:
@@ -57,11 +59,21 @@ class RAGPipeline:
             # Create vector store (FAISS)
             self.vector_store = FAISS.from_texts(texts, self.embeddings)
             
-            # Create QA chain
-            self.qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=self.vector_store.as_retriever(search_kwargs={"k": 3})
+            # Create retriever and QA chain using modern LangChain API
+            retriever = self.vector_store.as_retriever(search_kwargs={"k": 3})
+            
+            # Create a simple RAG chain
+            template = """Use the following context to answer the question.
+Context: {context}
+Question: {question}
+Answer:"""
+            prompt = PromptTemplate(template=template, input_variables=["context", "question"])
+            
+            self.qa_chain = (
+                {"context": retriever, "question": RunnablePassthrough()}
+                | prompt
+                | self.llm
+                | StrOutputParser()
             )
             
             print("✅ RAG Pipeline initialized successfully")
