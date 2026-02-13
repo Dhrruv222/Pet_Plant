@@ -9,6 +9,9 @@ import json
 import csv
 import threading
 import random
+import time
+import uuid
+import requests
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -266,6 +269,30 @@ class LocalAuth:
         
         return None
 
+# ==================== OLLAMA HELPERS ====================
+
+def call_ollama_direct(prompt, model="llama3", timeout=60):
+    """Call Ollama directly via HTTP (bypass LangChain timeout issues)"""
+    try:
+        print(f"[OLLAMA] Calling {model} with timeout={timeout}s...")
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=timeout
+        )
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("response", "").strip()
+        else:
+            print(f"[OLLAMA] Error: {response.status_code}")
+            return None
+    except requests.Timeout:
+        print(f"[OLLAMA] Timeout after {timeout}s")
+        return None
+    except Exception as e:
+        print(f"[OLLAMA] Error: {e}")
+        return None
+
 # ==================== RAG + OLLAMA INTEGRATION ====================
 
 class RAGPipeline:
@@ -278,7 +305,9 @@ class RAGPipeline:
         self.qa_chain = None
         self.llm = None
         self.embeddings = None
-        self._initialize()
+        self._init_thread = threading.Thread(target=self._initialize, daemon=True)
+        print("[INFO] Initializing RAG pipeline in background...")
+        self._init_thread.start()
     
     def _initialize(self):
         """Initialize LLM, embeddings, and vector store"""
@@ -358,7 +387,7 @@ class MQTTLogger:
     MQTT_PORT = 1883
     TOPIC_TEMP = "esp32/dht/temperature"
     TOPIC_HUM = "esp32/dht/humidity"
-    TOPIC_GAS = "esp32/mq2/gas"
+    TOPIC_GAS = "esp32/mq2/gas_level"
     TOPIC_SOIL = "esp32/soil/moisture"
     LOG_DIR = "data_logs"
     DEVICE_ID = "plant1"
@@ -368,16 +397,22 @@ class MQTTLogger:
         self.latest = {"temperature": None, "humidity": None, "gas_level": None, "soil_moisture": None}
         os.makedirs(self.LOG_DIR, exist_ok=True)
         
-        self.client = mqtt.Client(client_id=f"server-{self.DEVICE_ID}")
+        client_suffix = uuid.uuid4().hex[:8]
+        self.client = mqtt.Client(client_id=f"server-{self.DEVICE_ID}-{client_suffix}", clean_session=True)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_log = self._on_log
+        self.client.reconnect_delay_set(min_delay=1, max_delay=60)
         
         self._thread = None
         self._running = False
         self._lock = threading.Lock()
     
     def _on_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            print(f"[WARNING] MQTT connection refused (rc={rc})")
+            return
         print(f"[OK] MQTT connected (rc={rc})")
         client.subscribe(self.TOPIC_TEMP)
         client.subscribe(self.TOPIC_HUM)
@@ -386,7 +421,10 @@ class MQTTLogger:
         print("[INFO] Subscribed to sensor topics")
     
     def _on_disconnect(self, client, userdata, rc):
-        print("[WARNING] MQTT disconnected")
+        print(f"[WARNING] MQTT disconnected (rc={rc})")
+
+    def _on_log(self, client, userdata, level, buf):
+        print(f"[MQTT] {buf}")
     
     def _on_message(self, client, userdata, msg):
         payload = msg.payload.decode("utf-8", errors="ignore").strip()
@@ -475,8 +513,14 @@ class MQTTLogger:
         self._running = True
         
         def worker():
-            self.client.connect(self.MQTT_BROKER, self.MQTT_PORT, keepalive=60)
-            self.client.loop_forever()
+            try:
+                print("[INFO] MQTT connecting...")
+                self.client.connect_async(self.MQTT_BROKER, self.MQTT_PORT, keepalive=60)
+                self.client.loop_start()
+                while self._running:
+                    time.sleep(1)
+            except Exception as e:
+                print(f"[WARNING] MQTT loop error: {e}")
         
         self._thread = threading.Thread(target=worker, daemon=True)
         self._thread.start()
@@ -523,48 +567,55 @@ Respond optimistically despite the situation! Use happy emojis. Be encouraging! 
     
     system_prompt = personalities.get(personality, personalities["sassy"])
     
-    # Try RAG first for knowledge-based questions
-    rag_response = None
-    if rag_pipeline and rag_pipeline.qa_chain:
-        try:
-            rag_response = rag_pipeline.query(user_message)
-        except Exception as e:
-            print(f"[WARNING] RAG query error: {e}")
+    # Use direct Ollama call (no RAG needed for basic responses)
+    print("[RESPONSE] Calling Ollama directly...")
+    enhanced_prompt = f"{system_prompt}\n\nUser: {user_message}"
     
-    # Generate LLM response
-    try:
-        if rag_pipeline and rag_pipeline.llm:
-            # Combine RAG context with personality
-            if rag_response:
-                enhanced_prompt = f"{system_prompt}\n\nRelevant care info: {rag_response}\n\nUser: {user_message}"
-            else:
-                enhanced_prompt = f"{system_prompt}\n\nUser: {user_message}"
-            
-            response = rag_pipeline.llm.invoke(enhanced_prompt)
-            return response.strip()
-        else:
-            # Fallback to simple response
-            return get_fallback_response(user_message, mood_info, personality)
-    
-    except Exception as e:
-        print(f"[WARNING] LLM error: {e}")
-        return get_fallback_response(user_message, mood_info, personality)
+    response = call_ollama_direct(enhanced_prompt, model="llama3", timeout=60)
+    if response:
+        print(f"[RESPONSE] Ollama response received: {response[:100]}")
+        return response
+    else:
+        print("[RESPONSE] Ollama call failed, using fallback...")
+        return get_fallback_response(user_message, sensor_data, mood_info, personality)
 
-def get_fallback_response(user_message, mood_info, personality):
+def get_fallback_response(user_message, sensor_data, mood_info, personality):
     """Fallback response when LLM is unavailable"""
     situation = mood_info['situation_report']
+    soil = sensor_data.get('soil_moisture', 0)
+    temp = sensor_data.get('temperature', 0)
     
-    fallbacks = {
-        "sassy": f"Listen honey, I'd love to chat but I'm too busy dealing with this: {situation.split(chr(10))[0]} 💅",
-        "needy": f"I CAN'T focus on your question right now! 😭 Look at what I'm dealing with:\n{situation}",
-        "cheerful": f"Great question! Even with this situation, I believe in us:\n{situation.split(chr(10))[0]} 🌿"
-    }
+    # More interactive fallback responses based on mood and user message
+    if "water" in user_message.lower() or "drink" in user_message.lower():
+        fallbacks = {
+            "sassy": f"Ugh, finally someone notices! Yes, I'm PARCHED 💧 Look at me - soil moisture at {soil:.0f}%!",
+            "needy": f"OH THANK YOU for asking! 😭 I'm so thirsty... my soil is only at {soil:.0f}%...",
+            "cheerful": f"Happy to chat about hydration! ❤️ Even if I'm a bit dry at {soil:.0f}%, we'll make it through this! 🌿"
+        }
+    elif "temperature" in user_message.lower() or "warm" in user_message.lower() or "cold" in user_message.lower():
+        fallbacks = {
+            "sassy": f"Temperature? It's {temp:.1f}°C and I'm feeling {mood_info['mood']}! 🌡️",
+            "needy": f"It's {temp:.1f}°C and I'm {mood_info['mood']}... 😢",
+            "cheerful": f"The temp is looking {temp:.1f}°C - not too bad! 😊 We've got this! 🌱"
+        }
+    elif "how are you" in user_message.lower() or "feeling" in user_message.lower():
+        fallbacks = {
+            "sassy": f"How am I? I'm {mood_info['mood']}! {situation.split(chr(10))[0]} 💅",
+            "needy": f"I'm feeling... {mood_info['mood']} 😢 {situation.split(chr(10))[0]}",
+            "cheerful": f"I'm {mood_info['mood']} but positive! 🌟 {situation.split(chr(10))[0]}"
+        }
+    else:
+        fallbacks = {
+            "sassy": f"Look honey, I'm {mood_info['mood']}! Can't focus on chat right now - dealing with this: {situation.split(chr(10))[0]} 💅",
+            "needy": f"I can barely respond... I'm {mood_info['mood']}! 😭 {situation.split(chr(10))[0]}",
+            "cheerful": f"Great question! Even though I'm {mood_info['mood']}, let's stay positive! 🌿 {situation.split(chr(10))[0]}"
+        }
     
     return fallbacks.get(personality, fallbacks["sassy"])
 
 # ==================== GLOBAL INSTANCES ====================
 
-sensor_mgr = SensorDataManager(simulate=False)
+sensor_mgr = SensorDataManager(simulate=True)  # Enable simulation since ESP32 not connected
 mood_engine = MoodEngine()
 auth = LocalAuth()
 rag_pipeline = RAGPipeline()
@@ -669,6 +720,19 @@ def emergency_status():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/status')
+def system_status():
+    """Check system status"""
+    rag_ready = not (rag_pipeline._init_thread and rag_pipeline._init_thread.is_alive())
+    mqtt_connected = mqtt_logger.client.is_connected() if mqtt_logger else False
+    
+    return jsonify({
+        'status': 'online',
+        'rag_initialized': rag_ready,
+        'mqtt_connected': mqtt_connected,
+        'ollama_available': rag_pipeline.llm is not None
+    })
+
 @app.route('/api/chat', methods=['POST'])
 @login_required
 def chat():
@@ -680,11 +744,18 @@ def chat():
         if not user_message:
             return jsonify({'success': False, 'error': 'Empty message'}), 400
         
+        print(f"\n[CHAT] Received message: {user_message}")
+        
+        # NOTE: NOT waiting for RAG - using direct Ollama calls instead
+        # RAG initialization can happen in background without blocking chat
+        
         # Get current state
         sensor_data = sensor_mgr.get_data()
         mood_info = mood_engine.analyze(sensor_data)
+        print(f"[CHAT] Sensor data loaded, mood: {mood_info['mood']}")
         
         # Get plant response
+        print("[CHAT] Calling get_plant_response...")
         plant_response = get_plant_response(
             user_message,
             sensor_data,
@@ -692,6 +763,7 @@ def chat():
             rag_pipeline,
             personality="sassy"
         )
+        print(f"[CHAT] Response generated: {plant_response[:100]}")
         
         return jsonify({
             'success': True,
@@ -701,6 +773,9 @@ def chat():
         })
     
     except Exception as e:
+        print(f"[ERROR] Chat endpoint error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ==================== TEMPLATES ====================

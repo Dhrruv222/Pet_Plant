@@ -1,0 +1,7 @@
+timestamp,device_id,temperature_c,humidity_pct,soil_moisture_pct,gas_level,topic
+2026-02-13T00:17:50.158136+00:00,plant1,29.8,50.0,40.0,300,esp32/dht/temperature
+2026-02-13T00:17:51.884243+00:00,plant1,29.8,26.9,40.0,300,esp32/dht/humidity
+2026-02-13T00:17:52.029719+00:00,plant1,29.8,26.9,436.0,300,esp32/soil/moisture
+2026-02-13T00:44:47.628733+00:00,plant1,29.8,50.0,40.0,300,esp32/dht/temperature
+2026-02-13T00:44:48.676564+00:00,plant1,29.8,26.9,40.0,300,esp32/dht/humidity
+2026-02-13T00:44:48.912764+00:00,plant1,29.8,26.9,436.0,300,esp32/soil/moisture
